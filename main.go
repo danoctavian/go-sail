@@ -12,6 +12,7 @@ import (
   "github.com/dropbox/godropbox/errors"
   "golang.org/x/crypto/ssh"
   "bytes"
+  "flag"
 )
 
 
@@ -31,18 +32,27 @@ func main() {
   oauthClient := oauth2.NewClient(oauth2.NoContext, tokenSource)
   client := godo.NewClient(oauthClient)
 
+  cmd := flag.String("c", "list", "command: list ; delete ; create ; install")
+
+  flag.Parse()
+
   droplets, err := DropletList(client)
   if err != nil {
     log.Println(err)
     return
   }
 
-  log.Println(droplets)
+  switch (*cmd) {
+  case "list":
+    log.Println(droplets)
+  case "delete":
+    err = RemoveAllDroplets(client)
+  case "create":
+    err = createMasterSlaveDroplets(client, 5)
+  case "install":
+    err = RunTentacularOnDroplets(GetTentacularDroplets(droplets))
+  }
 
-  //err = RemoveAllDroplets(client)
-  //err = createMasterSlaveDroplets(client, 5)
-
-  err = RunTentacularOnDroplets(GetTentacularDroplets(droplets))
   if err != nil {
     log.Println(err)
     return
