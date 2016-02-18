@@ -34,6 +34,10 @@ func main() {
 
   cmd := flag.String("c", "list", "command: list ; delete ; create ; install")
 
+  slaveCount := flag.Int("slaves", 5, "slave count argument used upon creation")
+
+  procType := flag.String("type", "", "which type of nodes to install (slave/master). unspecified means all")
+
   flag.Parse()
 
   droplets, err := DropletList(client)
@@ -48,9 +52,23 @@ func main() {
   case "delete":
     err = RemoveAllDroplets(client)
   case "create":
-    err = createMasterSlaveDroplets(client, 5)
+    err = createMasterSlaveDroplets(client, *slaveCount)
   case "install":
-    err = RunTentacularOnDroplets(GetTentacularDroplets(droplets))
+    runMaster := false
+    runSlaves := false
+    switch *procType {
+    case "": runMaster = true ; runSlaves = true
+    case "slave": runSlaves = true
+    case "master": runMaster = true
+    default:
+      log.Fatal("unknown install type " + *procType)
+      return
+    }
+    master, slaves := GetTentacularDroplets(droplets)
+    err = RunTentacularOnDroplets(master, slaves, runMaster, runSlaves)
+  default:
+    log.Fatal("unknown command " + *cmd)
+    return
   }
 
   if err != nil {
@@ -181,60 +199,49 @@ func GetTentacularDroplets(droplets []godo.Droplet) (master *godo.Droplet, slave
   return master, slaves
 }
 
-// FIXME: implement
-func RunTentacularOnDroplets(master *godo.Droplet, slaves []godo.Droplet) (err error) {
-  if master == nil {
-    return errors.New("Missing master node.")
-  }
+func RunTentacularOnDroplets(master *godo.Droplet, slaves []godo.Droplet, runMaster, runSlaves bool) (err error) {
 
-  if len(slaves) == 0 {
-    return errors.New("No slave nodes available.")
-  }
-
-  nodeCount := 1 + len(slaves)
-
+  nodeCount := 0
+  if runMaster { nodeCount++ }
+  if runSlaves { nodeCount += len(slaves) }
   doneChan := make(chan error, nodeCount)
 
-  masterPubAddr, err := master.PublicIPv4()
-  if err != nil { err = errors.Wrap(err, "") ; return }
-
-  log.Println("running command")
-
-  // adding "&" at the end of commands so that it's ok to exit
-  go func() {
-    log.Println("running master proxy at " + masterPubAddr)
-    reString, err := RunRemoteCommand(masterPubAddr, setupCmd(RUN_PROXY_MASTER))
-    log.Println("master terminated with output " + reString)
-    if err != nil {
-      log.Println("master terminated with error.")
-      log.Println(err)
-    }
-    doneChan <- err
-  }()
-
-  masterPrivAddr, err := master.PrivateIPv4()
-  if err != nil { err = errors.Wrap(err, "") ; return }
-
-  slaveCommand := fmt.Sprintf(RUN_PROXY_SLAVE, masterPrivAddr)
-
-  for _, slave := range slaves {
-
-    slaveAddr, err := slave.PublicIPv4()
-    if err != nil {
-      fmt.Errorf("slave address could not be obtained. ignoring")
-      continue
-    }
-
+  if runMaster {
     go func() {
-      log.Println("running slave proxy at " + slaveAddr)
-      reString, err := RunRemoteCommand(slaveAddr, setupCmd(slaveCommand))
-      log.Println("slave terminated with output " + reString)
-      if err != nil {
-        log.Println("slave terminated with error.")
-        log.Println(err)
-      }
+      err = RunTentacularMaster(master)
       doneChan <- err
     }()
+  }
+
+  if runSlaves {
+    if len(slaves) == 0 {
+      return errors.New("No slave nodes available.")
+    }
+
+    masterPrivAddr, err := master.PrivateIPv4()
+    if err != nil { err = errors.Wrap(err, "") ; return err }
+
+    slaveCommand := fmt.Sprintf(RUN_PROXY_SLAVE, masterPrivAddr)
+
+    for _, slave := range slaves {
+
+      slaveAddr, err := slave.PublicIPv4()
+      if err != nil {
+        fmt.Errorf("slave address could not be obtained. ignoring")
+        continue
+      }
+
+      go func() {
+        log.Println("running slave proxy at " + slaveAddr)
+        reString, err := RunRemoteCommand(slaveAddr, setupCmd(slaveCommand))
+        log.Println("slave terminated with output " + reString)
+        if err != nil {
+          log.Println("slave terminated with error.")
+          log.Println(err)
+        }
+        doneChan <- err
+      }()
+    }
   }
 
   log.Println("waiting for procs to finish..")
@@ -242,6 +249,27 @@ func RunTentacularOnDroplets(master *godo.Droplet, slaves []godo.Droplet) (err e
     <- doneChan
   }
 
+  return nil
+}
+
+func RunTentacularMaster(master *godo.Droplet) error {
+  if master == nil {
+    return errors.New("Missing master node.")
+  }
+  masterPubAddr, err := master.PublicIPv4()
+  if err != nil { err = errors.Wrap(err, "") ; return err }
+
+  log.Println("running command")
+
+  // adding "&" at the end of commands so that it's ok to exit
+
+  log.Println("running master proxy at " + masterPubAddr)
+  reString, err := RunRemoteCommand(masterPubAddr, setupCmd(RUN_PROXY_MASTER))
+  log.Println("master terminated with output " + reString)
+  if err != nil {
+    log.Println("master terminated with error.")
+    log.Println(err)
+  }
   return nil
 }
 
@@ -299,5 +327,7 @@ func PublicKeyFile(file string) (auth ssh.AuthMethod, err error) {
   return ssh.PublicKeys(key), nil
 }
 
-const RUN_PROXY_MASTER = "docker run -p 8080:8080 -p 6666:6666 --name master --rm danoctavian/tentacular /go/bin/app --type=master"
-const RUN_PROXY_SLAVE = "docker run -p 8080:8080 --name slave --rm danoctavian/tentacular /go/bin/app --masterurl=\"http://%s:6666\""
+const RUN_PROXY_MASTER = DOCKER_REMOVE_ALL_CONTAINERS + "docker run -p 8080:8080 -p 6666:6666 --name master --rm danoctavian/tentacular /go/bin/app --type=master"
+const RUN_PROXY_SLAVE = DOCKER_REMOVE_ALL_CONTAINERS + "docker run -p 8080:8080 --name slave --rm danoctavian/tentacular /go/bin/app --masterurl=\"http://%s:6666\""
+
+const DOCKER_REMOVE_ALL_CONTAINERS = "docker rm --force `docker ps -qa`;"
