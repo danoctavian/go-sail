@@ -37,6 +37,7 @@ func main() {
   slaveCount := flag.Int("slaves", 5, "slave count argument used upon creation")
 
   procType := flag.String("type", "", "which type of nodes to install (slave/master). unspecified means all")
+  procArgs := flag.String("args", "", "arguments to that specific process")
 
   flag.Parse()
 
@@ -65,7 +66,7 @@ func main() {
       return
     }
     master, slaves := GetTentacularDroplets(droplets)
-    err = RunTentacularOnDroplets(master, slaves, runMaster, runSlaves)
+    err = RunTentacularOnDroplets(master, slaves, runMaster, runSlaves, *procArgs)
   default:
     log.Fatal("unknown command " + *cmd)
     return
@@ -199,7 +200,8 @@ func GetTentacularDroplets(droplets []godo.Droplet) (master *godo.Droplet, slave
   return master, slaves
 }
 
-func RunTentacularOnDroplets(master *godo.Droplet, slaves []godo.Droplet, runMaster, runSlaves bool) (err error) {
+func RunTentacularOnDroplets(master *godo.Droplet, slaves []godo.Droplet,
+                             runMaster, runSlaves bool, args string) (err error) {
 
   nodeCount := 0
   if runMaster { nodeCount++ }
@@ -208,7 +210,7 @@ func RunTentacularOnDroplets(master *godo.Droplet, slaves []godo.Droplet, runMas
 
   if runMaster {
     go func() {
-      err = RunTentacularMaster(master)
+      err = RunTentacularMaster(master, args)
       doneChan <- err
     }()
   }
@@ -223,6 +225,8 @@ func RunTentacularOnDroplets(master *godo.Droplet, slaves []godo.Droplet, runMas
 
     slaveCommand := fmt.Sprintf(RUN_PROXY_SLAVE, masterPrivAddr)
 
+    log.Print("Running command on slaves: " + slaveCommand)
+
     for _, slave := range slaves {
 
       slaveAddr, err := slave.PublicIPv4()
@@ -233,7 +237,7 @@ func RunTentacularOnDroplets(master *godo.Droplet, slaves []godo.Droplet, runMas
 
       go func() {
         log.Println("running slave proxy at " + slaveAddr)
-        reString, err := RunRemoteCommand(slaveAddr, setupCmd(slaveCommand))
+        reString, err := RunRemoteCommand(slaveAddr, setupCmd(slaveCommand, args))
         log.Println("slave terminated with output " + reString)
         if err != nil {
           log.Println("slave terminated with error.")
@@ -252,19 +256,18 @@ func RunTentacularOnDroplets(master *godo.Droplet, slaves []godo.Droplet, runMas
   return nil
 }
 
-func RunTentacularMaster(master *godo.Droplet) error {
+func RunTentacularMaster(master *godo.Droplet, args string) error {
   if master == nil {
     return errors.New("Missing master node.")
   }
   masterPubAddr, err := master.PublicIPv4()
   if err != nil { err = errors.Wrap(err, "") ; return err }
 
-  log.Println("running command")
-
-  // adding "&" at the end of commands so that it's ok to exit
-
-  log.Println("running master proxy at " + masterPubAddr)
-  reString, err := RunRemoteCommand(masterPubAddr, setupCmd(RUN_PROXY_MASTER))
+  masterCmd := setupCmd(RUN_PROXY_MASTER, args)
+  log.Print("Running command on master: " + masterCmd)
+  log.Println("Running master proxy at " + masterPubAddr)
+  
+  reString, err := RunRemoteCommand(masterPubAddr, masterCmd)
   log.Println("master terminated with output " + reString)
   if err != nil {
     log.Println("master terminated with error.")
@@ -281,8 +284,8 @@ func IsSlaveDroplet(droplet *godo.Droplet) bool {
   return strings.HasPrefix(droplet.Name, "slave")
 }
 
-func setupCmd(cmd string) string {
-  return "(" + cmd + ");sleep 5"
+func setupCmd(cmd string, args string) string {
+  return fmt.Sprintf("(%s %s); sleep 5", cmd, args)
 }
 
 // on a droplet assuming root user and ssh key at id_rsa.pub deployed
